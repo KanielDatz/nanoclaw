@@ -10,6 +10,7 @@ import {
   isTaskThread,
   TASKS_SYSTEM_THREAD_ID,
 } from './db/sessions.js';
+import { createChecklistItems, type ChecklistItem } from './db/checklists.js';
 import { appendRunLog } from './modules/scheduling/run-log.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
@@ -474,6 +475,37 @@ async function deliverMessage(
         log.info('Pending question created', { questionId: content.questionId, sessionId: session.id });
       }
     }
+  }
+
+  // Track checklist items for the send_checklist toggle flow.
+  // Guarded: checklist_items is unconditional (see migration 025), so this
+  // guard mirrors the pending_questions pattern for consistency rather than
+  // out of necessity. A sibling `if` to the ask_question block above — not a
+  // replacement.
+  if (
+    content.type === 'checklist' &&
+    content.checklistId &&
+    Array.isArray(content.items) &&
+    (await hasTable(getDb(), 'checklist_items'))
+  ) {
+    const checklistId = content.checklistId as string;
+    const sourceFile = (content.sourceFile as string) || null;
+    const items = content.items as Array<{ index: number; text: string }>;
+    const rows: ChecklistItem[] = items.map((item) => ({
+      checklistId,
+      itemIndex: item.index,
+      text: item.text,
+      checked: false,
+      sessionId: session.id,
+      messageOutId: msg.id,
+      platformId: msg.platformId,
+      channelType: msg.channelType,
+      threadId: msg.threadId,
+      sourceFile,
+      createdAt: new Date().toISOString(),
+    }));
+    await createChecklistItems(rows);
+    log.info('Checklist items created', { checklistId, count: rows.length, sessionId: session.id });
   }
 
   // Channel delivery
