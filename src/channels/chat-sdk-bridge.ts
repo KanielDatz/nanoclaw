@@ -16,6 +16,8 @@ import {
   Button,
   LinkButton,
   type CardChild,
+  type ActionsElement,
+  type ButtonElement,
   type Adapter,
   type AssistantContextChangedEvent,
   type AssistantThreadStartedEvent,
@@ -441,6 +443,24 @@ function checklistLabel(checked: boolean, text: string): string {
 }
 
 /**
+ * Buttons per checklist row. The Chat SDK maps each `Actions([...])` block to
+ * one inline-keyboard row (see `toInlineKeyboardRow`/`collectInlineKeyboardRows`
+ * in @chat-adapter/telegram) — a single `Actions` holding every item renders
+ * as one long horizontally-scrolling row, unreadable past a handful of items.
+ * Chunking into multiple `Actions` blocks gives real multi-row layout.
+ */
+const CHECKLIST_BUTTONS_PER_ROW = 2;
+
+/** Split checklist items into `Actions([...])` rows of `CHECKLIST_BUTTONS_PER_ROW`. */
+function checklistActionRows<T>(items: T[], toButton: (item: T) => ButtonElement): ActionsElement[] {
+  const rows: ActionsElement[] = [];
+  for (let i = 0; i < items.length; i += CHECKLIST_BUTTONS_PER_ROW) {
+    rows.push(Actions(items.slice(i, i + CHECKLIST_BUTTONS_PER_ROW).map(toButton)));
+  }
+  return rows;
+}
+
+/**
  * The half-open `[start, end)` line range holding the body of the `## Items`
  * section — start is the line after the heading, end is the next heading (or
  * end of file). `null` when the file has no `## Items` heading.
@@ -852,17 +872,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           const allItems = await getChecklistItems(checklistId);
           const card = Card({
             title: item.title,
-            children: [
-              Actions(
-                allItems.map((i) =>
-                  Button({
-                    id: `chk:${checklistId}:${i.itemIndex}`,
-                    label: checklistLabel(i.checked, i.text),
-                    value: String(i.itemIndex),
-                  }),
-                ),
-              ),
-            ],
+            children: checklistActionRows(allItems, (i) =>
+              Button({
+                id: `chk:${checklistId}:${i.itemIndex}`,
+                label: checklistLabel(i.checked, i.text),
+                value: String(i.itemIndex),
+              }),
+            ),
           });
           try {
             await adapter.editMessage(event.threadId, event.messageId, {
@@ -1073,20 +1089,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
         const card = Card({
           title,
-          children: [
-            Actions(
-              // `chk:<checklistId>:<index>` mirrors `ncq:`'s short-id scheme so
-              // the whole action id stays inside Telegram's 64-byte
-              // callback_data cap.
-              items.map((item) =>
-                Button({
-                  id: `chk:${checklistId}:${item.index}`,
-                  label: checklistLabel(false, item.text),
-                  value: String(item.index),
-                }),
-              ),
-            ),
-          ],
+          // `chk:<checklistId>:<index>` mirrors `ncq:`'s short-id scheme so
+          // the whole action id stays inside Telegram's 64-byte callback_data
+          // cap.
+          children: checklistActionRows(items, (item) =>
+            Button({
+              id: `chk:${checklistId}:${item.index}`,
+              label: checklistLabel(false, item.text),
+              value: String(item.index),
+            }),
+          ),
         });
         const result = await adapter.postMessage(tid, {
           card,

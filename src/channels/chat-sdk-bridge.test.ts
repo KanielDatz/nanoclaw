@@ -695,6 +695,35 @@ describe('createChatSdkBridge.deliver — checklist cards', () => {
     expect(msg.fallbackText).toBe('Shopping\n⬜ milk\n⬜ eggs');
   });
 
+  it('splits items into multiple rows instead of one long row', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'checklist',
+        checklistId: 'cl1',
+        title: 'Shopping',
+        items: [
+          { index: 0, text: 'milk' },
+          { index: 1, text: 'eggs' },
+          { index: 2, text: 'bread' },
+        ],
+      },
+    });
+    const msg = calls[0].message as {
+      card?: { children?: Array<{ type?: string; children?: CapturedButton[] }> };
+    };
+    const actionRows = msg.card?.children?.filter((c) => c.type === 'actions') ?? [];
+    // CHECKLIST_BUTTONS_PER_ROW is 2 — 3 items must split 2 + 1, not one row of 3.
+    expect(actionRows).toHaveLength(2);
+    expect(actionRows[0].children?.map((b) => b.id)).toEqual(['chk:cl1:0', 'chk:cl1:1']);
+    expect(actionRows[1].children?.map((b) => b.id)).toEqual(['chk:cl1:2']);
+  });
+
   it('skips delivery when the checklist has no title', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
