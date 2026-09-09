@@ -26,6 +26,7 @@ import { GROUPS_DIR } from '../config.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { getChecklistItem, getChecklistItems, setChecklistItemChecked } from '../db/checklists.js';
 import { getSession } from '../db/sessions.js';
+import { isPathInside } from '../inbox-safety.js';
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
@@ -440,8 +441,11 @@ function checklistLabel(checked: boolean, text: string): string {
 }
 
 /**
- * Where a restored (unchecked) item's line goes back into a tracked markdown
- * file. The real deployed `shopping-list.md` is shaped:
+ * The half-open `[start, end)` line range holding the body of the `## Items`
+ * section — start is the line after the heading, end is the next heading (or
+ * end of file). `null` when the file has no `## Items` heading.
+ *
+ * The real deployed `shopping-list.md` is shaped:
  *
  *     ## Items
  *
@@ -452,33 +456,68 @@ function checklistLabel(checked: boolean, text: string): string {
  *
  *     prose…
  *
- * so appending at end-of-file would land the item inside the prose section.
- * The line belongs after the LAST item under `## Items` — i.e. immediately
- * before the trailing blank line(s) that precede the next heading. When there
- * is no `## Items` heading at all, fall back to end-of-file.
+ * Both directions of the toggle are bounded by this range, so they stay
+ * symmetric: a `- milk` line appearing as an example under "How this file
+ * works" is neither removed by a check nor treated as the list's tail by an
+ * uncheck.
  *
  * Exported for unit testing against a fixture of that exact structure.
  */
-export function insertItemLine(lines: string[], itemLine: string): string[] {
-  const out = [...lines];
-  const itemsIdx = out.findIndex((l) => /^##+\s+items\s*$/i.test(l.trim()));
-  if (itemsIdx === -1) {
-    out.push(itemLine);
-    return out;
-  }
-  // Section boundary: the next heading after "## Items", else end of file.
-  let boundary = out.length;
-  for (let i = itemsIdx + 1; i < out.length; i++) {
-    if (/^#{1,6}\s/.test(out[i])) {
-      boundary = i;
+export function itemsSectionRange(lines: string[]): { headingIdx: number; start: number; end: number } | null {
+  const headingIdx = lines.findIndex((l) => /^##+\s+items\s*$/i.test(l.trim()));
+  if (headingIdx === -1) return null;
+  let end = lines.length;
+  for (let i = headingIdx + 1; i < lines.length; i++) {
+    if (/^#{1,6}\s/.test(lines[i])) {
+      end = i;
       break;
     }
   }
+  return { headingIdx, start: headingIdx + 1, end };
+}
+
+/**
+ * Remove the first `itemLine` found **inside the `## Items` section**. With no
+ * `## Items` heading the whole file is the search space (a flat list file).
+ * Returns the lines unchanged when the item is not present.
+ */
+export function removeItemLine(lines: string[], itemLine: string): string[] {
+  const range = itemsSectionRange(lines);
+  const start = range ? range.start : 0;
+  const end = range ? range.end : lines.length;
+  for (let i = start; i < end; i++) {
+    if (lines[i].trim() === itemLine) {
+      const out = [...lines];
+      out.splice(i, 1);
+      return out;
+    }
+  }
+  return lines;
+}
+
+/**
+ * Where a restored (unchecked) item's line goes back in: after the LAST item
+ * under `## Items` — i.e. immediately before the trailing blank line(s) that
+ * precede the next heading — so it never lands inside the prose section. When
+ * there is no `## Items` heading at all, fall back to end-of-file.
+ */
+export function insertItemLine(lines: string[], itemLine: string): string[] {
+  const out = [...lines];
+  const range = itemsSectionRange(out);
+  if (!range) {
+    out.push(itemLine);
+    return out;
+  }
   // Back off over the blank line(s) separating the last item from the boundary.
-  let insertAt = boundary;
-  while (insertAt > itemsIdx + 1 && out[insertAt - 1].trim() === '') insertAt--;
+  let insertAt = range.end;
+  while (insertAt > range.start && out[insertAt - 1].trim() === '') insertAt--;
   out.splice(insertAt, 0, itemLine);
   return out;
+}
+
+/** True when `itemLine` already appears inside the `## Items` section. */
+export function hasItemLine(lines: string[], itemLine: string): boolean {
+  return removeItemLine(lines, itemLine) !== lines;
 }
 
 export function splitForLimit(text: string, limit: number): string[] {
@@ -763,18 +802,46 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
               const session = await getSession(item.sessionId);
               const group = session ? await getAgentGroup(session.agent_group_id) : undefined;
               if (group) {
-                const filePath = path.resolve(GROUPS_DIR, group.folder, 'memory', item.sourceFile);
-                const raw = await fs.readFile(filePath, 'utf-8');
-                let lines = raw.split('\n');
-                const itemLine = `- ${item.text}`;
-                if (newChecked) {
-                  // "Bought" means "no longer needed" — drop the line.
-                  const idx = lines.findIndex((l) => l.trim() === itemLine);
-                  if (idx !== -1) lines.splice(idx, 1);
-                } else if (!lines.some((l) => l.trim() === itemLine)) {
-                  lines = insertItemLine(lines, itemLine);
+                // `sourceFile` is agent-controlled: it arrives from inside the
+                // container on the send_checklist payload. Two ways it can
+                // escape the group's memory dir, both real:
+                //   1. traversal or an absolute path ('../../../.ssh/…') —
+                //      path.resolve happily leaves the group folder;
+                //   2. a symlink the agent pre-planted (memory/ is mounted
+                //      read-write into the container), which readFile and
+                //      writeFile both follow (CWE-59, the GHSA #2828 class).
+                // Same guard as src/inbox-safety.ts, reused rather than
+                // reinvented. A rejection only skips the file sync — the DB
+                // flip and the card edit still happen, exactly like the
+                // missing-file case below.
+                const memoryRoot = path.resolve(GROUPS_DIR, group.folder, 'memory');
+                const filePath = path.resolve(memoryRoot, item.sourceFile);
+                if (!isPathInside(memoryRoot, filePath)) {
+                  log.warn('checklist sourceFile escapes the group memory dir — skipping sync', {
+                    checklistId,
+                    itemIndex,
+                    sourceFile: item.sourceFile,
+                  });
+                } else if ((await fs.lstat(filePath)).isSymbolicLink()) {
+                  // lstat does not follow the final component, so a pre-placed
+                  // symlink is visible here even when its target does not exist.
+                  log.warn('checklist sourceFile is a symlink — skipping sync', {
+                    checklistId,
+                    itemIndex,
+                    sourceFile: item.sourceFile,
+                  });
+                } else {
+                  const raw = await fs.readFile(filePath, 'utf-8');
+                  let lines = raw.split('\n');
+                  const itemLine = `- ${item.text}`;
+                  if (newChecked) {
+                    // "Bought" means "no longer needed" — drop the line.
+                    lines = removeItemLine(lines, itemLine);
+                  } else if (!hasItemLine(lines, itemLine)) {
+                    lines = insertItemLine(lines, itemLine);
+                  }
+                  await fs.writeFile(filePath, lines.join('\n'), 'utf-8');
                 }
-                await fs.writeFile(filePath, lines.join('\n'), 'utf-8');
               }
             } catch (err) {
               log.warn('Failed to sync checklist toggle to source file', { err, checklistId, itemIndex });
@@ -1212,7 +1279,8 @@ function startLocalWebhookServer(
   });
 }
 
-async function handleForwardedEvent(
+/** Exported for unit testing the interaction branch (no live Gateway needed). */
+export async function handleForwardedEvent(
   body: string,
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
@@ -1237,6 +1305,12 @@ async function handleForwardedEvent(
         (interaction.user as Record<string, string> | undefined);
       const interactionId = interaction.id as string;
       const interactionToken = interaction.token as string;
+
+      // Checklist taps are handled host-side via chat.onAction; the ncq: card
+      // rewrite below would wipe the checklist's buttons (it posts a type:7
+      // update with components: []). Not yet supported on the Discord Gateway
+      // path — acknowledge nothing, change nothing.
+      if (customId?.startsWith('chk:')) return;
 
       // Parse the selected option from custom_id
       let questionId: string | undefined;

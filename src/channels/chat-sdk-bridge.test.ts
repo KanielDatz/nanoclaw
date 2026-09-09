@@ -1,10 +1,17 @@
 import fsSync from 'fs';
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, insertItemLine, splitForLimit } from './chat-sdk-bridge.js';
+import {
+  createChatSdkBridge,
+  handleForwardedEvent,
+  hasItemLine,
+  insertItemLine,
+  removeItemLine,
+  splitForLimit,
+} from './chat-sdk-bridge.js';
 import { requestWake } from '../request-wake.js';
 import { writeSessionMessage } from '../session-manager.js';
 
@@ -703,6 +710,51 @@ describe('createChatSdkBridge.deliver — checklist cards', () => {
   });
 });
 
+describe('removeItemLine — bounded to the "## Items" section', () => {
+  // Removal used to scan the whole file, while re-insertion was already
+  // section-aware. That asymmetry silently removed the wrong line whenever the
+  // prose section quoted an item's own text as an example.
+  const WITH_EXAMPLE_IN_PROSE = [
+    '# Shopping List',
+    '',
+    '## Items',
+    '',
+    '- milk',
+    '- eggs',
+    '',
+    '## How this file works',
+    '',
+    'Add a line under Items, e.g.',
+    '- milk',
+    '',
+  ];
+
+  it('removes the item from the Items section, not the identical example in the prose', () => {
+    const out = removeItemLine(WITH_EXAMPLE_IN_PROSE, '- milk');
+    expect(out.slice(2, 7)).toEqual(['## Items', '', '- eggs', '', '## How this file works']);
+    // The prose example survives.
+    expect(out[out.length - 2]).toBe('- milk');
+  });
+
+  it('leaves the file unchanged (same array identity) when the item is only in the prose', () => {
+    const out = removeItemLine(WITH_EXAMPLE_IN_PROSE, '- bread');
+    expect(out).toBe(WITH_EXAMPLE_IN_PROSE);
+  });
+
+  it('falls back to the whole file when there is no "## Items" heading (flat list file)', () => {
+    expect(removeItemLine(['- milk', '- eggs'], '- milk')).toEqual(['- eggs']);
+  });
+
+  it('hasItemLine only sees items inside the Items section', () => {
+    expect(hasItemLine(WITH_EXAMPLE_IN_PROSE, '- milk')).toBe(true);
+    expect(hasItemLine(WITH_EXAMPLE_IN_PROSE, '- bread')).toBe(false);
+    // "- coffee" quoted only in prose must NOT count as present, or an uncheck
+    // would refuse to restore it to the list.
+    const proseOnly = ['## Items', '', '## Notes', '', '- coffee'];
+    expect(hasItemLine(proseOnly, '- coffee')).toBe(false);
+  });
+});
+
 describe('chat.onAction — chk: checklist toggles (host-side only, never wakes a container)', () => {
   // The hard behavioral constraint of this feature: a checklist tap flips the
   // row, rewrites the card, and (optionally) syncs a tracked file — and stops.
@@ -724,7 +776,9 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
     return msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
   }
 
-  let onAction: ReturnType<typeof vi.fn>;
+  // Typed to ChannelSetup['onAction'] so the spy is assignable to bridge.setup
+  // — an untyped vi.fn() is Mock<Procedure | Constructable> and fails tsc.
+  let onAction: Mock<(questionId: string, selectedOption: string, userId: string) => void>;
   let edits: PostCall[];
   let bridge: ReturnType<typeof createChatSdkBridge>;
   let boundAdapter: Adapter;
@@ -918,6 +972,78 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
     expect(onAction).not.toHaveBeenCalled();
   });
 
+  // ── sourceFile containment (agent-controlled path) ──────────────────────
+  // `sourceFile` arrives from inside the container on the send_checklist
+  // payload, so it is attacker-influenced if the agent is compromised. It must
+  // never let a host-side write land outside the group's memory dir. A refusal
+  // is silent to the user: the button still flips and the card still updates,
+  // exactly like the missing-file case.
+
+  it('refuses a traversing sourceFile: the outside file is untouched, the toggle still works', async () => {
+    await seedChecklist('../../../escaped.md');
+    const outside = `${CHK_TEST_DIR}/escaped.md`;
+    // Deliberately contains the item line: without the containment guard the
+    // sync finds and deletes it, so these bytes are a real kill condition and
+    // not just a canary that would look clean either way.
+    const outsideContent = ['## Items', '', '- milk', '', '## How this file works', ''].join('\n');
+    fsSync.writeFileSync(outside, outsideContent, 'utf-8');
+    const { getChecklistItem } = await import('../db/checklists.js');
+
+    await fireTap(0);
+
+    expect(fsSync.readFileSync(outside, 'utf-8')).toBe(outsideContent);
+    // The toggle itself is unaffected — DB flipped, card re-rendered.
+    expect((await getChecklistItem('cl1', 0))!.checked).toBe(true);
+    expect(editedButtons(edits).map((b) => b.label)).toEqual(['✅ milk', '⬜ eggs']);
+    expect(onAction).not.toHaveBeenCalled();
+    expect(requestWake).not.toHaveBeenCalled();
+    expect(writeSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it('refuses an absolute sourceFile: the targeted file is untouched, the toggle still works', async () => {
+    // Task 3's own delivery fixture already persists an absolute sourceFile
+    // ('/workspace/shopping.md'), so this shape is in the real corpus.
+    const absolute = `${CHK_TEST_DIR}/absolute-target.md`;
+    const absoluteContent = ['## Items', '', '- milk', '', '## How this file works', ''].join('\n');
+    fsSync.writeFileSync(absolute, absoluteContent, 'utf-8');
+    await seedChecklist(absolute);
+    const { getChecklistItem } = await import('../db/checklists.js');
+
+    await fireTap(0);
+
+    expect(fsSync.readFileSync(absolute, 'utf-8')).toBe(absoluteContent);
+    expect((await getChecklistItem('cl1', 0))!.checked).toBe(true);
+    expect(editedButtons(edits).map((b) => b.label)).toEqual(['✅ milk', '⬜ eggs']);
+    expect(onAction).not.toHaveBeenCalled();
+    expect(requestWake).not.toHaveBeenCalled();
+    expect(writeSessionMessage).not.toHaveBeenCalled();
+  });
+
+  // A contained relative path can still escape via a symlink the agent
+  // pre-planted: the group's memory/ dir is mounted read-write into the
+  // container, and readFile/writeFile both follow links (CWE-59). Windows
+  // refuses symlink creation without elevation, so this self-skips there and
+  // runs for real on macOS/Linux (where nanoclaw actually deploys).
+  it('refuses a symlinked sourceFile, leaving the link target untouched', async () => {
+    await seedChecklist('tracking/shopping-list.md');
+    const target = `${CHK_TEST_DIR}/link-target.md`;
+    const targetContent = ['## Items', '', '- milk', '', '## How this file works', ''].join('\n');
+    fsSync.writeFileSync(target, targetContent, 'utf-8');
+    const link = `${CHK_TEST_DIR}/groups/household/memory/tracking/shopping-list.md`;
+    try {
+      fsSync.symlinkSync(target, link);
+    } catch {
+      return; // symlinks unavailable on this platform — nothing to assert
+    }
+    const { getChecklistItem } = await import('../db/checklists.js');
+
+    await fireTap(0);
+
+    expect(fsSync.readFileSync(target, 'utf-8')).toBe(targetContent);
+    expect((await getChecklistItem('cl1', 0))!.checked).toBe(true);
+    expect(editedButtons(edits).map((b) => b.label)).toEqual(['✅ milk', '⬜ eggs']);
+  });
+
   it('ignores a tap for an unknown checklist without falling through to the ncq: path', async () => {
     await seedChecklist(null);
     await fireAction('chk:nope:0', '0');
@@ -925,5 +1051,67 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
     expect(onAction).not.toHaveBeenCalled();
     expect(requestWake).not.toHaveBeenCalled();
     expect(writeSessionMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleForwardedEvent — Discord Gateway interactions', () => {
+  // The Gateway branch only understands `ncq:` custom_ids. Before the guard, a
+  // `chk:` tap fell into the ncq: rewrite: a type:7 callback that replaces the
+  // message with a "❓ Question" embed and `components: []`, permanently wiping
+  // the checklist's buttons. No Discord channel is installed on this fork
+  // today, so this is insurance against a future /add-discord.
+
+  const gatewayAdapter = () => stubAdapter({ name: 'discord', handleWebhook: async () => new Response('ok') });
+
+  function interaction(customId: string): string {
+    return JSON.stringify({
+      type: 'GATEWAY_INTERACTION_CREATE',
+      data: {
+        type: 3,
+        id: 'int-1',
+        token: 'tok-1',
+        data: { custom_id: customId },
+        user: { id: 'u1', username: 'dani' },
+        message: { embeds: [{ title: 'Shopping', description: '' }] },
+      },
+    });
+  }
+
+  let fetchSpy: ReturnType<typeof vi.fn>;
+  // Typed to ChannelSetup['onAction'] so the spy is assignable to bridge.setup
+  // — an untyped vi.fn() is Mock<Procedure | Constructable> and fails tsc.
+  let onAction: Mock<(questionId: string, selectedOption: string, userId: string) => void>;
+
+  beforeEach(async () => {
+    // The ncq: path reads pending_questions via resolveQuestionRender.
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    await runMigrations(await initTestDb());
+    fetchSpy = vi.fn(async () => new Response('{}'));
+    vi.stubGlobal('fetch', fetchSpy);
+    onAction = vi.fn();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const { closeDb } = await import('../db/connection.js');
+    await closeDb();
+  });
+
+  const hostCfg = () => ({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction }) as never;
+
+  it('leaves a chk: interaction completely alone — no card rewrite, no host dispatch', async () => {
+    await handleForwardedEvent(interaction('chk:cl1:0'), gatewayAdapter() as never, hostCfg());
+    // The type:7 rewrite that would strip the buttons never fires...
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // ...and the single-shot question path is never entered.
+    expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it('still handles an ncq: interaction (the guard is scoped to chk:, no regression)', async () => {
+    await handleForwardedEvent(interaction('ncq:q1:0'), gatewayAdapter() as never, hostCfg());
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const url = fetchSpy.mock.calls[0][0] as string;
+    expect(url).toContain('/interactions/int-1/tok-1/callback');
   });
 });

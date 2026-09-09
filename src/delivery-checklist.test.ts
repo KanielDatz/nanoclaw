@@ -160,6 +160,24 @@ describe('deliverSessionMessages — checklist persistence', () => {
     expect(row?.source_file).toBeNull();
   });
 
+  // The bridge's render branch refuses to deliver a titleless checklist
+  // (logs an error, posts nothing). Persisting rows here anyway would leave
+  // orphan checklist_items with no card to tap, so both sites must agree.
+  it('persists nothing when the checklist has no title (matches the render branch refusing it)', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertChecklistOutbound('ag-1', session.id, 'chk-out-untitled', {
+      type: 'checklist',
+      checklistId: 'clist-untitled',
+      items: [{ index: 0, text: 'Milk' }],
+    });
+
+    await deliverSessionMessages(session);
+
+    const rows = await getDb().all('SELECT * FROM checklist_items WHERE checklist_id = ?', 'clist-untitled');
+    expect(rows).toHaveLength(0);
+  });
+
   it('is idempotent under delivery retry: re-delivering the same checklistId does not throw', async () => {
     await seedAgentAndChannel();
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');

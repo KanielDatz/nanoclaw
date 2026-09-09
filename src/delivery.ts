@@ -482,9 +482,13 @@ async function deliverMessage(
   // guard mirrors the pending_questions pattern for consistency rather than
   // out of necessity. A sibling `if` to the ask_question block above — not a
   // replacement.
+  // A missing title is fatal for a checklist: the bridge's render branch
+  // refuses to deliver one, so persisting rows here would leave orphan
+  // checklist_items with no card to tap. Both sites must agree.
   if (
     content.type === 'checklist' &&
     content.checklistId &&
+    content.title &&
     Array.isArray(content.items) &&
     (await hasTable(getDb(), 'checklist_items'))
   ) {
@@ -493,7 +497,7 @@ async function deliverMessage(
     // The title lives on the outbound content, not on any per-item field. It is
     // denormalized onto every row so the host-side toggle handler can re-render
     // the card without reaching back into the session's outbound.db.
-    const title = (content.title as string) || '';
+    const title = content.title as string;
     const items = content.items as Array<{ index: number; text: string }>;
     const rows: ChecklistItem[] = items.map((item) => ({
       checklistId,
