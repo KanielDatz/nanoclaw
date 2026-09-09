@@ -21,7 +21,11 @@ vi.mock('./container-runner.js', () => ({
 
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-delivery-checklist', GROUPS_DIR: '/tmp/nanoclaw-test-delivery-checklist/groups' };
+  return {
+    ...actual,
+    DATA_DIR: '/tmp/nanoclaw-test-delivery-checklist',
+    GROUPS_DIR: '/tmp/nanoclaw-test-delivery-checklist/groups',
+  };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-delivery-checklist';
@@ -106,6 +110,7 @@ describe('deliverSessionMessages — checklist persistence', () => {
       checklist_id: string;
       item_index: number;
       text: string;
+      title: string;
       checked: number;
       session_id: string;
       message_out_id: string;
@@ -120,6 +125,7 @@ describe('deliverSessionMessages — checklist persistence', () => {
       checklist_id: 'clist-1',
       item_index: 0,
       text: 'Milk',
+      title: 'Shopping list',
       checked: 0,
       session_id: session.id,
       message_out_id: 'chk-out-1',

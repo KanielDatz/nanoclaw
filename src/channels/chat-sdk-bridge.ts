@@ -4,7 +4,9 @@
  *
  * Used by Discord, Slack, and other Chat SDK-supported platforms.
  */
+import fs from 'fs/promises';
 import http from 'http';
+import path from 'path';
 
 import {
   Chat,
@@ -20,6 +22,10 @@ import {
   type ConcurrencyStrategy,
   type Message as ChatMessage,
 } from 'chat';
+import { GROUPS_DIR } from '../config.js';
+import { getAgentGroup } from '../db/agent-groups.js';
+import { getChecklistItem, getChecklistItems, setChecklistItemChecked } from '../db/checklists.js';
+import { getSession } from '../db/sessions.js';
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
@@ -420,6 +426,61 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Checklist rendering + source-file sync
+// ---------------------------------------------------------------------------
+
+/**
+ * A checklist item's button label. The Chat SDK's `Button` has no strikethrough
+ * or checked affordance (`ButtonOptions` is id/label/value/style/disabled only,
+ * and `TextStyle` is plain|bold|muted), so the checkbox is the emoji prefix.
+ */
+function checklistLabel(checked: boolean, text: string): string {
+  return `${checked ? '✅' : '⬜'} ${text}`;
+}
+
+/**
+ * Where a restored (unchecked) item's line goes back into a tracked markdown
+ * file. The real deployed `shopping-list.md` is shaped:
+ *
+ *     ## Items
+ *
+ *     - milk
+ *     - eggs
+ *
+ *     ## How this file works
+ *
+ *     prose…
+ *
+ * so appending at end-of-file would land the item inside the prose section.
+ * The line belongs after the LAST item under `## Items` — i.e. immediately
+ * before the trailing blank line(s) that precede the next heading. When there
+ * is no `## Items` heading at all, fall back to end-of-file.
+ *
+ * Exported for unit testing against a fixture of that exact structure.
+ */
+export function insertItemLine(lines: string[], itemLine: string): string[] {
+  const out = [...lines];
+  const itemsIdx = out.findIndex((l) => /^##+\s+items\s*$/i.test(l.trim()));
+  if (itemsIdx === -1) {
+    out.push(itemLine);
+    return out;
+  }
+  // Section boundary: the next heading after "## Items", else end of file.
+  let boundary = out.length;
+  for (let i = itemsIdx + 1; i < out.length; i++) {
+    if (/^#{1,6}\s/.test(out[i])) {
+      boundary = i;
+      break;
+    }
+  }
+  // Back off over the blank line(s) separating the last item from the boundary.
+  let insertAt = boundary;
+  while (insertAt > itemsIdx + 1 && out[insertAt - 1].trim() === '') insertAt--;
+  out.splice(insertAt, 0, itemLine);
+  return out;
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -675,8 +736,78 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         });
       });
 
-      // Handle button clicks (ask_user_question)
+      // Handle button clicks (ask_user_question, checklist toggles)
       chat.onAction(async (event) => {
+        // Checklist toggle — handled entirely host-side. This branch is
+        // deliberately checked BEFORE the ncq: path and always returns: a
+        // checklist tap must never reach setupConfig.onAction (which resolves
+        // a pending_question via response-registry.ts and wakes the
+        // container). No requestWake, no writeSessionMessage, no LLM turn.
+        if (event.actionId.startsWith('chk:')) {
+          const parts = event.actionId.split(':');
+          if (parts.length < 3) return;
+          const checklistId = parts[1];
+          const itemIndex = Number(parts[2]);
+          if (!checklistId || !Number.isInteger(itemIndex)) return;
+
+          const item = await getChecklistItem(checklistId, itemIndex);
+          if (!item) return;
+
+          const newChecked = !item.checked;
+          await setChecklistItemChecked(checklistId, itemIndex, newChecked);
+
+          if (item.sourceFile) {
+            /* eslint-disable no-catch-all/no-catch-all -- file sync must never
+               leave the button stuck: the DB + card update regardless */
+            try {
+              const session = await getSession(item.sessionId);
+              const group = session ? await getAgentGroup(session.agent_group_id) : undefined;
+              if (group) {
+                const filePath = path.resolve(GROUPS_DIR, group.folder, 'memory', item.sourceFile);
+                const raw = await fs.readFile(filePath, 'utf-8');
+                let lines = raw.split('\n');
+                const itemLine = `- ${item.text}`;
+                if (newChecked) {
+                  // "Bought" means "no longer needed" — drop the line.
+                  const idx = lines.findIndex((l) => l.trim() === itemLine);
+                  if (idx !== -1) lines.splice(idx, 1);
+                } else if (!lines.some((l) => l.trim() === itemLine)) {
+                  lines = insertItemLine(lines, itemLine);
+                }
+                await fs.writeFile(filePath, lines.join('\n'), 'utf-8');
+              }
+            } catch (err) {
+              log.warn('Failed to sync checklist toggle to source file', { err, checklistId, itemIndex });
+            }
+            /* eslint-enable no-catch-all/no-catch-all */
+          }
+
+          const allItems = await getChecklistItems(checklistId);
+          const card = Card({
+            title: item.title,
+            children: [
+              Actions(
+                allItems.map((i) =>
+                  Button({
+                    id: `chk:${checklistId}:${i.itemIndex}`,
+                    label: checklistLabel(i.checked, i.text),
+                    value: String(i.itemIndex),
+                  }),
+                ),
+              ),
+            ],
+          });
+          try {
+            await adapter.editMessage(event.threadId, event.messageId, {
+              card,
+              fallbackText: [item.title, ...allItems.map((i) => checklistLabel(i.checked, i.text))].join('\n'),
+            });
+          } catch (err) {
+            log.warn('Failed to update checklist message after toggle', { err, checklistId });
+          }
+          return;
+        }
+
         if (!event.actionId.startsWith('ncq:')) return;
         const parts = event.actionId.split(':');
         if (parts.length < 3) return;
@@ -857,6 +988,42 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const result = await adapter.postMessage(tid, {
           card,
           fallbackText: `${title}\n\n${question}\nOptions: ${options.map((o) => o.label).join(', ')}`,
+        });
+        return result?.id;
+      }
+
+      // Checklist card — one button per item, toggled independently, never
+      // consumed. Sibling to the ask_question branch above, not a replacement:
+      // ask_question is single-shot (one tap resolves and deletes the row), a
+      // checklist lives as long as its message and accepts many taps.
+      if (content.type === 'checklist' && content.checklistId && Array.isArray(content.items)) {
+        const checklistId = content.checklistId as string;
+        const title = content.title as string;
+        const items = content.items as Array<{ index: number; text: string }>;
+        if (!title) {
+          log.error('checklist missing required title — skipping delivery', { checklistId });
+          return;
+        }
+        const card = Card({
+          title,
+          children: [
+            Actions(
+              // `chk:<checklistId>:<index>` mirrors `ncq:`'s short-id scheme so
+              // the whole action id stays inside Telegram's 64-byte
+              // callback_data cap.
+              items.map((item) =>
+                Button({
+                  id: `chk:${checklistId}:${item.index}`,
+                  label: checklistLabel(false, item.text),
+                  value: String(item.index),
+                }),
+              ),
+            ),
+          ],
+        });
+        const result = await adapter.postMessage(tid, {
+          card,
+          fallbackText: `${title}\n${items.map((i) => checklistLabel(false, i.text)).join('\n')}`,
         });
         return result?.id;
       }

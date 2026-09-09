@@ -490,11 +490,16 @@ async function deliverMessage(
   ) {
     const checklistId = content.checklistId as string;
     const sourceFile = (content.sourceFile as string) || null;
+    // The title lives on the outbound content, not on any per-item field. It is
+    // denormalized onto every row so the host-side toggle handler can re-render
+    // the card without reaching back into the session's outbound.db.
+    const title = (content.title as string) || '';
     const items = content.items as Array<{ index: number; text: string }>;
     const rows: ChecklistItem[] = items.map((item) => ({
       checklistId,
       itemIndex: item.index,
       text: item.text,
+      title,
       checked: false,
       sessionId: session.id,
       messageOutId: msg.id,

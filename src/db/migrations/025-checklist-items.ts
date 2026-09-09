@@ -7,6 +7,12 @@ import type { Migration } from './index.js';
  * flips `checked` in place, never deletes the row, and the message gets
  * re-rendered with updated buttons. See `src/channels/chat-sdk-bridge.ts`'s
  * `chk:` action-id branch for the toggle handler.
+ *
+ * `title` is denormalized onto every item row (rather than being re-read from
+ * the originating `messages_out` row) because the toggle handler runs
+ * host-side on every tap and re-renders the whole card: the alternative would
+ * mean opening the session's `outbound.db` across the container mount per tap
+ * just to recover one string. It is constant across a checklist's rows.
  */
 export const migration025: Migration = {
   version: 25,
@@ -17,6 +23,7 @@ export const migration025: Migration = {
         checklist_id   TEXT NOT NULL,
         item_index     INTEGER NOT NULL,
         text           TEXT NOT NULL,
+        title          TEXT NOT NULL,
         checked        INTEGER NOT NULL DEFAULT 0,
         session_id     TEXT NOT NULL REFERENCES sessions(id),
         message_out_id TEXT NOT NULL,

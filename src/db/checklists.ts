@@ -6,6 +6,8 @@ export interface ChecklistItem {
   checklistId: string;
   itemIndex: number;
   text: string;
+  /** The checklist's title, denormalized onto every row (see migration 025). */
+  title: string;
   checked: boolean;
   sessionId: string;
   messageOutId: string;
@@ -20,6 +22,7 @@ interface ChecklistItemRow {
   checklist_id: string;
   item_index: number;
   text: string;
+  title: string;
   checked: number;
   session_id: string;
   message_out_id: string;
@@ -35,6 +38,7 @@ function fromRow(row: ChecklistItemRow): ChecklistItem {
     checklistId: row.checklist_id,
     itemIndex: row.item_index,
     text: row.text,
+    title: row.title,
     checked: row.checked !== 0,
     sessionId: row.session_id,
     messageOutId: row.message_out_id,
@@ -60,14 +64,15 @@ export async function createChecklistItems(items: ChecklistItem[]): Promise<void
     for (const item of items) {
       await db.run(
         `INSERT INTO checklist_items
-             (checklist_id, item_index, text, checked, session_id, message_out_id, platform_id, channel_type, thread_id, source_file, created_at)
+             (checklist_id, item_index, text, title, checked, session_id, message_out_id, platform_id, channel_type, thread_id, source_file, created_at)
            VALUES
-             (@checklist_id, @item_index, @text, @checked, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @source_file, @created_at)
+             (@checklist_id, @item_index, @text, @title, @checked, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @source_file, @created_at)
            ON CONFLICT (checklist_id, item_index) DO NOTHING`,
         {
           checklist_id: item.checklistId,
           item_index: item.itemIndex,
           text: item.text,
+          title: item.title,
           checked: item.checked ? 1 : 0,
           session_id: item.sessionId,
           message_out_id: item.messageOutId,

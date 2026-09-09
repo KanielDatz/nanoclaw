@@ -1,12 +1,39 @@
+import fsSync from 'fs';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, insertItemLine, splitForLimit } from './chat-sdk-bridge.js';
+import { requestWake } from '../request-wake.js';
+import { writeSessionMessage } from '../session-manager.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
 }));
+
+// GROUPS_DIR is resolved from process.cwd() at module load; the checklist
+// source-file sync writes under it, so point it at a scratch tree.
+vi.mock('../config.js', async () => {
+  const actual = await vi.importActual<typeof import('../config.js')>('../config.js');
+  return {
+    ...actual,
+    GROUPS_DIR: '/tmp/nanoclaw-test-chat-sdk-checklist/groups',
+  };
+});
+
+// Spied so the checklist tests can assert the container is never woken and no
+// session message is ever written for a `chk:` action. The bridge does not
+// import either module today — these assertions are the regression guard that
+// keeps it that way.
+vi.mock('../request-wake.js', async () => {
+  const actual = await vi.importActual<typeof import('../request-wake.js')>('../request-wake.js');
+  return { ...actual, requestWake: vi.fn(actual.requestWake) };
+});
+vi.mock('../session-manager.js', async () => {
+  const actual = await vi.importActual<typeof import('../session-manager.js')>('../session-manager.js');
+  return { ...actual, writeSessionMessage: vi.fn(actual.writeSessionMessage) };
+});
 
 function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
@@ -540,5 +567,363 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('insertItemLine — restoring an item into a tracked markdown file', () => {
+  // Fixture reproducing the real deployed
+  // groups/household/memory/tracking/shopping-list.md: an "## Items" heading,
+  // a flat list of "- item" lines, a blank line, then "## How this file works"
+  // with prose after it. Appending at end-of-file would bury the item in the
+  // prose section — that is the bug this function exists to avoid.
+  const SHOPPING_LIST = [
+    '# Shopping List',
+    '',
+    '## Items',
+    '',
+    '- milk',
+    '- eggs',
+    '- bread',
+    '',
+    '## How this file works',
+    '',
+    'Add a line under Items when something runs out.',
+    'The assistant removes the line once it has been bought.',
+    '',
+  ];
+
+  it('inserts as the last item under "## Items", before the blank line preceding the next heading', () => {
+    const out = insertItemLine(SHOPPING_LIST, '- coffee');
+    expect(out).toEqual([
+      '# Shopping List',
+      '',
+      '## Items',
+      '',
+      '- milk',
+      '- eggs',
+      '- bread',
+      '- coffee',
+      '',
+      '## How this file works',
+      '',
+      'Add a line under Items when something runs out.',
+      'The assistant removes the line once it has been bought.',
+      '',
+    ]);
+    // The prose section is untouched and still trails the item list.
+    expect(out.indexOf('- coffee')).toBeLessThan(out.indexOf('## How this file works'));
+  });
+
+  it('round-trips a removal: remove then re-insert reproduces the original file', () => {
+    const removed = SHOPPING_LIST.filter((l) => l.trim() !== '- eggs');
+    // Order differs (eggs goes back at the end of the section), so compare sets
+    // of item lines plus the structural frame.
+    const restored = insertItemLine(removed, '- eggs');
+    expect(restored.filter((l) => l.startsWith('- '))).toEqual(['- milk', '- bread', '- eggs']);
+    expect(restored[restored.indexOf('- eggs') + 1]).toBe('');
+    expect(restored[restored.indexOf('- eggs') + 2]).toBe('## How this file works');
+  });
+
+  it('inserts into an empty "## Items" section, keeping the blank line before the next heading', () => {
+    const out = insertItemLine(['## Items', '', '## How this file works', '', 'prose'], '- milk');
+    // The section's single blank line stays where it separates the item list
+    // from the next heading — the item goes directly under the heading.
+    expect(out).toEqual(['## Items', '- milk', '', '## How this file works', '', 'prose']);
+  });
+
+  it('falls back to end-of-file when there is no "## Items" heading', () => {
+    const out = insertItemLine(['- milk', '- eggs'], '- bread');
+    expect(out).toEqual(['- milk', '- eggs', '- bread']);
+  });
+
+  it('handles "## Items" as the last section (no following heading)', () => {
+    const out = insertItemLine(['## Items', '', '- milk', ''], '- eggs');
+    expect(out).toEqual(['## Items', '', '- milk', '- eggs', '']);
+  });
+});
+
+describe('createChatSdkBridge.deliver — checklist cards', () => {
+  interface CapturedButton {
+    type?: string;
+    id?: string;
+    label?: string;
+    value?: string;
+  }
+
+  function checklistButtons(calls: PostCall[]): CapturedButton[] {
+    const msg = calls[0].message as {
+      card?: { title?: string; children?: Array<{ type?: string; children?: CapturedButton[] }> };
+    };
+    const actionsRow = msg.card?.children?.find((c) => c.type === 'actions');
+    expect(actionsRow).toBeDefined();
+    return actionsRow?.children ?? [];
+  }
+
+  it('renders one button per item, ids chk:<checklistId>:<index>, all unchecked', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    const id = await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'checklist',
+        checklistId: 'cl1',
+        title: 'Shopping',
+        items: [
+          { index: 0, text: 'milk' },
+          { index: 1, text: 'eggs' },
+        ],
+      },
+    });
+    expect(id).toBe('msg-stub');
+    expect(calls).toHaveLength(1);
+    const msg = calls[0].message as { card?: { title?: string }; fallbackText?: string };
+    expect(msg.card?.title).toBe('Shopping');
+    const buttons = checklistButtons(calls);
+    expect(buttons.map((b) => b.id)).toEqual(['chk:cl1:0', 'chk:cl1:1']);
+    expect(buttons.map((b) => b.label)).toEqual(['⬜ milk', '⬜ eggs']);
+    expect(buttons.map((b) => b.value)).toEqual(['0', '1']);
+    expect(msg.fallbackText).toBe('Shopping\n⬜ milk\n⬜ eggs');
+  });
+
+  it('skips delivery when the checklist has no title', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    const id = await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { type: 'checklist', checklistId: 'cl1', items: [{ index: 0, text: 'milk' }] },
+    });
+    expect(id).toBeUndefined();
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('chat.onAction — chk: checklist toggles (host-side only, never wakes a container)', () => {
+  // The hard behavioral constraint of this feature: a checklist tap flips the
+  // row, rewrites the card, and (optionally) syncs a tracked file — and stops.
+  // It must never reach setupConfig.onAction (which resolves a pending_question
+  // through response-registry.ts), requestWake, or writeSessionMessage.
+
+  const CHK_TEST_DIR = '/tmp/nanoclaw-test-chat-sdk-checklist';
+
+  interface CapturedButton {
+    id?: string;
+    label?: string;
+    value?: string;
+  }
+
+  function editedButtons(list: PostCall[]): CapturedButton[] {
+    const msg = list[0].message as {
+      card?: { title?: string; children?: Array<{ type?: string; children?: CapturedButton[] }> };
+    };
+    return msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
+  }
+
+  let onAction: ReturnType<typeof vi.fn>;
+  let edits: PostCall[];
+  let bridge: ReturnType<typeof createChatSdkBridge>;
+  let boundAdapter: Adapter;
+
+  async function seedChecklist(sourceFile: string | null): Promise<void> {
+    const { createAgentGroup } = await import('../db/agent-groups.js');
+    const { createSession } = await import('../db/sessions.js');
+    const { createChecklistItems } = await import('../db/checklists.js');
+    const ts = new Date().toISOString();
+    await createAgentGroup({
+      id: 'ag-1',
+      name: 'Household',
+      folder: 'household',
+      agent_provider: null,
+      created_at: ts,
+    });
+    await createSession({
+      id: 'sess-1',
+      agent_group_id: 'ag-1',
+      messaging_group_id: null,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: ts,
+    });
+    await createChecklistItems(
+      [
+        { itemIndex: 0, text: 'milk' },
+        { itemIndex: 1, text: 'eggs' },
+      ].map((i) => ({
+        checklistId: 'cl1',
+        itemIndex: i.itemIndex,
+        text: i.text,
+        title: 'Shopping',
+        checked: false,
+        sessionId: 'sess-1',
+        messageOutId: 'msg-out-1',
+        platformId: 'telegram:42',
+        channelType: 'telegram',
+        threadId: null,
+        sourceFile,
+        createdAt: ts,
+      })),
+    );
+  }
+
+  function chatOf(): { processAction: (e: unknown, o: unknown) => Promise<void> } {
+    return (bridge as unknown as { _chat: { processAction: (e: unknown, o: unknown) => Promise<void> } })._chat;
+  }
+
+  async function fireAction(actionId: string, value: string): Promise<void> {
+    await chatOf().processAction(
+      {
+        actionId,
+        adapter: boundAdapter,
+        messageId: 'plat-msg-1',
+        raw: {},
+        threadId: 'telegram:42',
+        user: { userId: 'telegram:7', userName: 'dani' },
+        value,
+      },
+      undefined,
+    );
+  }
+
+  const fireTap = (index: number) => fireAction(`chk:cl1:${index}`, String(index));
+
+  beforeEach(async () => {
+    fsSync.rmSync(CHK_TEST_DIR, { recursive: true, force: true });
+    fsSync.mkdirSync(`${CHK_TEST_DIR}/groups/household/memory/tracking`, { recursive: true });
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    await runMigrations(await initTestDb());
+
+    onAction = vi.fn();
+    edits = [];
+    boundAdapter = stubAdapter({
+      name: 'telegram',
+      initialize: async () => {},
+      // Chat.handleActionEvent builds a Thread for the event before dispatching.
+      channelIdFromThreadId: (threadId: string) => threadId,
+      editMessage: async (threadId: string, _messageId: string, message: AdapterPostableMessage) => {
+        edits.push({ threadId, message });
+        return { id: 'plat-msg-1', threadId, raw: {} };
+      },
+    });
+    bridge = createChatSdkBridge({ adapter: boundAdapter, supportsThreads: false });
+    await bridge.setup({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction,
+    });
+  });
+
+  afterEach(async () => {
+    await bridge.teardown();
+    const { closeDb } = await import('../db/connection.js');
+    await closeDb();
+    fsSync.rmSync(CHK_TEST_DIR, { recursive: true, force: true });
+    vi.mocked(requestWake).mockClear();
+    vi.mocked(writeSessionMessage).mockClear();
+  });
+
+  it('flips the item, re-renders the card, and never wakes the container', async () => {
+    await seedChecklist(null);
+    const { getChecklistItem } = await import('../db/checklists.js');
+
+    await fireTap(0);
+
+    expect(edits).toHaveLength(1);
+    expect(edits[0].threadId).toBe('telegram:42');
+    const msg = edits[0].message as { card?: { title?: string }; fallbackText?: string };
+    expect(msg.card?.title).toBe('Shopping');
+    const buttons = editedButtons(edits);
+    expect(buttons.map((b) => b.id)).toEqual(['chk:cl1:0', 'chk:cl1:1']);
+    expect(buttons.map((b) => b.label)).toEqual(['✅ milk', '⬜ eggs']);
+    expect(msg.fallbackText).toBe('Shopping\n✅ milk\n⬜ eggs');
+
+    expect((await getChecklistItem('cl1', 0))!.checked).toBe(true);
+    expect((await getChecklistItem('cl1', 1))!.checked).toBe(false);
+
+    // THE constraint: no LLM turn, no container wake, no single-shot resolution.
+    expect(onAction).not.toHaveBeenCalled();
+    expect(requestWake).not.toHaveBeenCalled();
+    expect(writeSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it('is non-consuming: a second tap unchecks the same item', async () => {
+    await seedChecklist(null);
+    const { getChecklistItem } = await import('../db/checklists.js');
+
+    await fireTap(0);
+    await fireTap(0);
+
+    expect(edits).toHaveLength(2);
+    expect(editedButtons([edits[1]]).map((b) => b.label)).toEqual(['⬜ milk', '⬜ eggs']);
+    expect((await getChecklistItem('cl1', 0))!.checked).toBe(false);
+    expect(onAction).not.toHaveBeenCalled();
+    expect(requestWake).not.toHaveBeenCalled();
+    expect(writeSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it('mirrors the toggle into the tracked source file: check removes the line, a second tap restores it', async () => {
+    await seedChecklist('tracking/shopping-list.md');
+    const filePath = `${CHK_TEST_DIR}/groups/household/memory/tracking/shopping-list.md`;
+    const original = [
+      '# Shopping List',
+      '',
+      '## Items',
+      '',
+      '- milk',
+      '- eggs',
+      '- bread',
+      '',
+      '## How this file works',
+      '',
+      'Add a line under Items when something runs out.',
+      '',
+    ].join('\n');
+    fsSync.writeFileSync(filePath, original, 'utf-8');
+
+    await fireTap(0); // check "milk" → removed from the file
+    let lines = fsSync.readFileSync(filePath, 'utf-8').split('\n');
+    expect(lines.filter((l) => l.startsWith('- '))).toEqual(['- eggs', '- bread']);
+    expect(lines).toContain('## How this file works');
+
+    await fireTap(0); // uncheck "milk" → restored under "## Items"
+    lines = fsSync.readFileSync(filePath, 'utf-8').split('\n');
+    expect(lines.filter((l) => l.startsWith('- '))).toEqual(['- eggs', '- bread', '- milk']);
+    // Restored inside the Items section, not appended after the prose.
+    expect(lines.indexOf('- milk')).toBeLessThan(lines.indexOf('## How this file works'));
+    expect(lines[lines.indexOf('- milk') + 1]).toBe('');
+    expect(lines[lines.length - 1]).toBe('');
+
+    expect(onAction).not.toHaveBeenCalled();
+    expect(requestWake).not.toHaveBeenCalled();
+    expect(writeSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it('still updates the DB and the card when the source file is missing', async () => {
+    await seedChecklist('tracking/does-not-exist.md');
+    const { getChecklistItem } = await import('../db/checklists.js');
+
+    await fireTap(1);
+
+    expect((await getChecklistItem('cl1', 1))!.checked).toBe(true);
+    expect(editedButtons(edits).map((b) => b.label)).toEqual(['⬜ milk', '✅ eggs']);
+    expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it('ignores a tap for an unknown checklist without falling through to the ncq: path', async () => {
+    await seedChecklist(null);
+    await fireAction('chk:nope:0', '0');
+    expect(edits).toHaveLength(0);
+    expect(onAction).not.toHaveBeenCalled();
+    expect(requestWake).not.toHaveBeenCalled();
+    expect(writeSessionMessage).not.toHaveBeenCalled();
   });
 });

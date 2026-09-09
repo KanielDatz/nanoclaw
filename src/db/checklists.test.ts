@@ -44,6 +44,7 @@ function item(overrides: Partial<ChecklistItem> = {}): ChecklistItem {
     checklistId: 'chk-1',
     itemIndex: 0,
     text: 'Milk',
+    title: 'Shopping',
     checked: false,
     sessionId: 'sess-1',
     messageOutId: 'msg-out-1',
