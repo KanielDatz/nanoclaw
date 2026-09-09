@@ -953,6 +953,64 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
     expect(writeSessionMessage).not.toHaveBeenCalled();
   });
 
+  it('re-renders a 3-item checklist across multiple rows, not one row of 3', async () => {
+    const { createAgentGroup } = await import('../db/agent-groups.js');
+    const { createSession } = await import('../db/sessions.js');
+    const { createChecklistItems } = await import('../db/checklists.js');
+    const ts = new Date().toISOString();
+    await createAgentGroup({
+      id: 'ag-1',
+      name: 'Household',
+      folder: 'household',
+      agent_provider: null,
+      created_at: ts,
+    });
+    await createSession({
+      id: 'sess-1',
+      agent_group_id: 'ag-1',
+      messaging_group_id: null,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: ts,
+    });
+    await createChecklistItems(
+      [
+        { itemIndex: 0, text: 'milk' },
+        { itemIndex: 1, text: 'eggs' },
+        { itemIndex: 2, text: 'bread' },
+      ].map((i) => ({
+        checklistId: 'cl1',
+        itemIndex: i.itemIndex,
+        text: i.text,
+        title: 'Shopping',
+        checked: false,
+        sessionId: 'sess-1',
+        messageOutId: 'msg-out-1',
+        platformId: 'telegram:42',
+        channelType: 'telegram',
+        threadId: null,
+        sourceFile: null,
+        createdAt: ts,
+      })),
+    );
+
+    await fireTap(0);
+
+    const msg = edits[0].message as {
+      card?: { children?: Array<{ type?: string; children?: CapturedButton[] }> };
+    };
+    const actionRows = msg.card?.children?.filter((c) => c.type === 'actions') ?? [];
+    // CHECKLIST_BUTTONS_PER_ROW is 2 — 3 items must split 2 + 1 on re-render too,
+    // same as on initial delivery. This is the toggle-handler's own render path,
+    // a separate call site from the initial `content.type === 'checklist'` branch.
+    expect(actionRows).toHaveLength(2);
+    expect(actionRows[0].children?.map((b) => b.id)).toEqual(['chk:cl1:0', 'chk:cl1:1']);
+    expect(actionRows[1].children?.map((b) => b.id)).toEqual(['chk:cl1:2']);
+  });
+
   it('mirrors the toggle into the tracked source file: check removes the line, a second tap restores it', async () => {
     await seedChecklist('tracking/shopping-list.md');
     const filePath = `${CHK_TEST_DIR}/groups/household/memory/tracking/shopping-list.md`;
