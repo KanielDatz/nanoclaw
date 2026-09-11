@@ -29,7 +29,17 @@ echo "STEP: fetch-channels-branch"
 git fetch origin channels
 
 echo "STEP: copy-files"
-git show origin/channels:src/channels/github.ts > src/channels/github.ts
+# Publish only a complete Git result; a failed copy must remain retryable.
+(
+  [[ ! -d src/channels/github.ts ]]
+  nc_copy_dir="$(mktemp -d src/channels/.github.ts.XXXXXX)"
+  trap 'rm -rf -- "$nc_copy_dir"' EXIT
+  if [[ -f src/channels/github.ts ]]; then
+    cp -p -- src/channels/github.ts "$nc_copy_dir/payload"
+  fi
+  git show origin/channels:src/channels/github.ts > "$nc_copy_dir/payload"
+  mv -- "$nc_copy_dir/payload" src/channels/github.ts
+)
 
 echo "STEP: register-import"
 if ! grep -q "import './github.js';" src/channels/index.ts; then
