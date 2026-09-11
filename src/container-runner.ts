@@ -1217,7 +1217,19 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     // to /root/.npmrc (base image sets it up for agent-browser) so packages
     // with postinstall — e.g. playwright, puppeteer, native addons — don't
     // install silently broken.
-    const allowlist = npmPackages.map((p) => `echo 'only-built-dependencies[]=${p}' >> /root/.npmrc`).join(' && ');
+    //
+    // This only allowlists the TOP-LEVEL requested packages — a transitive
+    // dependency with its own postinstall (e.g. `sharp`'s native binary
+    // build, pulled in by `@xenova/transformers` for optional image support)
+    // stays blocked and fails at import time with no build-time error, since
+    // pnpm silently skips it rather than failing the install. Also allowlist
+    // the small set of common native-dependency packages this repo's own
+    // root `pnpm-workspace.yaml` already trusts unconditionally, so a group
+    // that pulls one of these in transitively doesn't hit the same silent
+    // failure.
+    const alwaysTrustedTransitiveNativeDeps = ['sharp', 'better-sqlite3'];
+    const allowlistPackages = [...new Set([...npmPackages, ...alwaysTrustedTransitiveNativeDeps])];
+    const allowlist = allowlistPackages.map((p) => `echo 'only-built-dependencies[]=${p}' >> /root/.npmrc`).join(' && ');
     dockerfile += `RUN ${allowlist} && pnpm install -g ${npmPackages.join(' ')}\n`;
   }
   dockerfile += 'USER node\n';
