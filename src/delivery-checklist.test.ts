@@ -141,6 +141,30 @@ describe('deliverSessionMessages — checklist persistence', () => {
     });
   });
 
+  it('persists a per-item description through the real delivery path', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertChecklistOutbound('ag-1', session.id, 'chk-out-desc', {
+      type: 'checklist',
+      checklistId: 'clist-desc',
+      title: 'Chores',
+      items: [
+        { index: 0, text: 'Take out trash', description: 'Tuesdays and Fridays, bins go curbside' },
+        { index: 1, text: 'Water plants' }, // no description — must persist as null, not undefined/missing
+      ],
+      sourceFile: 'tracking/chores.md',
+      section: 'Open / this week',
+    });
+
+    await deliverSessionMessages(session);
+
+    const { getChecklistItem } = await import('./db/checklists.js');
+    const described = await getChecklistItem('clist-desc', 0);
+    const undescribed = await getChecklistItem('clist-desc', 1);
+    expect(described?.description).toBe('Tuesdays and Fridays, bins go curbside');
+    expect(undescribed?.description).toBeNull();
+  });
+
   it('defaults source_file to null when the checklist has no tracked file', async () => {
     await seedAgentAndChannel();
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
