@@ -724,6 +724,67 @@ describe('createChatSdkBridge.deliver — checklist cards', () => {
     expect(actionRows[1].children?.map((b) => b.id)).toEqual(['chk:cl1:2']);
   });
 
+  it('switches to one-per-row with description text under the described items only', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'checklist',
+        checklistId: 'cl1',
+        title: 'Chores',
+        items: [
+          { index: 0, text: 'Take out trash', description: 'Tuesdays and Fridays, bins go curbside by 7am' },
+          { index: 1, text: 'Water plants' }, // no description — button only
+        ],
+      },
+    });
+    const msg = calls[0].message as {
+      card?: { children?: Array<{ type?: string; children?: CapturedButton[]; content?: string; text?: string }> };
+    };
+    const children = msg.card?.children ?? [];
+    // One-per-row: two Actions blocks (one button each), not one Actions of two.
+    const actionRows = children.filter((c) => c.type === 'actions');
+    expect(actionRows).toHaveLength(2);
+    expect(actionRows[0].children?.map((b) => b.id)).toEqual(['chk:cl1:0']);
+    expect(actionRows[1].children?.map((b) => b.id)).toEqual(['chk:cl1:1']);
+    // A text child immediately follows the described item's row...
+    const firstRowIdx = children.indexOf(actionRows[0]);
+    const afterFirstRow = children[firstRowIdx + 1];
+    expect(afterFirstRow?.type).toBe('text');
+    // ...and nothing (no stray text child) follows the undescribed item's row.
+    const secondRowIdx = children.indexOf(actionRows[1]);
+    expect(children[secondRowIdx + 1]).toBeUndefined();
+  });
+
+  it('keeps the compact multi-per-row layout when no item has a description', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'checklist',
+        checklistId: 'cl1',
+        title: 'Shopping',
+        items: [
+          { index: 0, text: 'milk', description: null },
+          { index: 1, text: 'eggs', description: undefined },
+        ],
+      },
+    });
+    const msg = calls[0].message as { card?: { children?: Array<{ type?: string }> } };
+    // A `description` key present but empty/undefined must not trip the
+    // "any item described" switch — this is the real request shape
+    // send_checklist produces for a plain string item.
+    expect(msg.card?.children?.filter((c) => c.type === 'actions')).toHaveLength(1);
+  });
+
   it('skips delivery when the checklist has no title', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
@@ -852,6 +913,7 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
         threadId: null,
         sourceFile,
         sectionHeading,
+        description: null,
         createdAt: ts,
       })),
     );
@@ -995,6 +1057,7 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
         threadId: null,
         sourceFile: null,
         sectionHeading: null,
+        description: null,
         createdAt: ts,
       })),
     );

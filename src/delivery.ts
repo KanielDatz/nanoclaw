@@ -499,7 +499,7 @@ async function deliverMessage(
     // denormalized onto every row so the host-side toggle handler can re-render
     // the card without reaching back into the session's outbound.db.
     const title = content.title as string;
-    const items = content.items as Array<{ index: number; text: string }>;
+    const items = content.items as Array<{ index: number; text: string; description?: string | null }>;
     const rows: ChecklistItem[] = items.map((item) => ({
       checklistId,
       itemIndex: item.index,
@@ -513,6 +513,7 @@ async function deliverMessage(
       threadId: msg.threadId,
       sourceFile,
       sectionHeading,
+      description: item.description || null,
       createdAt: new Date().toISOString(),
     }));
     await createChecklistItems(rows);

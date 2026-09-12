@@ -1,10 +1,11 @@
 /**
  * `send_checklist` MCP tool: posts a tappable checklist (one button per
  * item) to a destination. This tool only writes the outbound `messages_out`
- * row shaped `{type:'checklist', checklistId, title, items:[{index,text}],
- * sourceFile}` — the host-side rendering, the `chk:` action-id dispatch, and
- * any file-sync behavior for `sourceFile` are handled elsewhere (see
- * src/channels/chat-sdk-bridge.ts and src/delivery.ts).
+ * row shaped `{type:'checklist', checklistId, title,
+ * items:[{index,text,description}], sourceFile, section}` — the host-side
+ * rendering, the `chk:` action-id dispatch, and any file-sync behavior for
+ * `sourceFile` are handled elsewhere (see src/channels/chat-sdk-bridge.ts
+ * and src/delivery.ts).
  *
  * Helper style (resolveRouting/destinationList/ok/err/generateId) is
  * duplicated from core.ts rather than shared — see core.ts's own doc
@@ -82,8 +83,21 @@ export const sendChecklist: McpToolDefinition = {
         title: { type: 'string', description: 'Checklist title shown above the items.' },
         items: {
           type: 'array',
-          items: { type: 'string' },
-          description: 'Item text, one per line/button, in the order shown.',
+          items: {
+            oneOf: [
+              { type: 'string' },
+              {
+                type: 'object',
+                properties: {
+                  text: { type: 'string' },
+                  description: { type: 'string' },
+                },
+                required: ['text'],
+              },
+            ],
+          },
+          description:
+            'One entry per button, in the order shown. A bare string is the button label with no extra text. Use {text, description} when the item needs real explanation — description renders as its own text line under that item\'s button (buttons can\'t wrap or show more than a short label), and any item in the list having one switches ALL items in this checklist to one-per-row layout so each description sits under the right button.',
         },
         sourceFile: {
           type: 'string',
@@ -102,12 +116,23 @@ export const sendChecklist: McpToolDefinition = {
   async handler(args) {
     const to = args.to as string;
     const title = args.title as string;
-    const items = args.items as string[];
+    const rawItems = args.items as Array<string | { text: string; description?: string }>;
     const sourceFile = (args.sourceFile as string) || null;
     const section = (args.section as string) || null;
     if (!to) return err(`to is required. Options: ${destinationList()}`);
     if (!title) return err('title is required');
-    if (!Array.isArray(items) || items.length === 0) return err('items must be a non-empty array');
+    if (!Array.isArray(rawItems) || rawItems.length === 0) return err('items must be a non-empty array');
+    const items: Array<{ text: string; description: string | null }> = [];
+    for (const raw of rawItems) {
+      if (typeof raw === 'string') {
+        if (!raw) return err('an item cannot be an empty string');
+        items.push({ text: raw, description: null });
+      } else if (raw && typeof raw === 'object' && typeof raw.text === 'string' && raw.text) {
+        items.push({ text: raw.text, description: raw.description || null });
+      } else {
+        return err('each item must be a non-empty string, or an object with a non-empty "text" field');
+      }
+    }
 
     const routing = resolveRouting(to);
     if ('error' in routing) return err(routing.error);
@@ -125,7 +150,7 @@ export const sendChecklist: McpToolDefinition = {
         type: 'checklist',
         checklistId,
         title,
-        items: items.map((text, index) => ({ index, text })),
+        items: items.map((item, index) => ({ index, text: item.text, description: item.description })),
         sourceFile,
         section,
       }),

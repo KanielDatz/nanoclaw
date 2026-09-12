@@ -53,6 +53,7 @@ function item(overrides: Partial<ChecklistItem> = {}): ChecklistItem {
     threadId: null,
     sourceFile: null,
     sectionHeading: null,
+    description: null,
     createdAt: now(),
     ...overrides,
   };

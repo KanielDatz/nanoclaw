@@ -460,6 +460,35 @@ function checklistActionRows<T>(items: T[], toButton: (item: T) => ButtonElement
   return rows;
 }
 
+/**
+ * Build a checklist's card children, choosing layout by whether any item
+ * carries a description. Buttons can't wrap or show more than a short
+ * label (no ButtonOptions field for it — see the `checklistLabel` doc
+ * comment above), so a real description needs its own text line — which
+ * only makes sense one item per row: batching two items per row (the
+ * plain-list default) would leave a description with no unambiguous
+ * button to sit under. A single described item switches the WHOLE
+ * checklist to one-per-row, description text immediately under that
+ * item's own row, so the mixed case (some items described, some not)
+ * still reads unambiguously top-to-bottom.
+ */
+function checklistCardChildren<T>(
+  items: T[],
+  toButton: (item: T) => ButtonElement,
+  getDescription: (item: T) => string | null | undefined,
+): CardChild[] {
+  if (!items.some((item) => !!getDescription(item))) {
+    return checklistActionRows(items, toButton);
+  }
+  const children: CardChild[] = [];
+  for (const item of items) {
+    children.push(Actions([toButton(item)]));
+    const description = getDescription(item);
+    if (description) children.push(CardText(description));
+  }
+  return children;
+}
+
 /** Default section heading for a checklist's `sourceFile` sync when none is given. */
 const DEFAULT_SECTION_HEADING = 'items';
 
@@ -886,12 +915,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           const allItems = await getChecklistItems(checklistId);
           const card = Card({
             title: item.title,
-            children: checklistActionRows(allItems, (i) =>
-              Button({
-                id: `chk:${checklistId}:${i.itemIndex}`,
-                label: checklistLabel(i.checked, i.text),
-                value: String(i.itemIndex),
-              }),
+            children: checklistCardChildren(
+              allItems,
+              (i) =>
+                Button({
+                  id: `chk:${checklistId}:${i.itemIndex}`,
+                  label: checklistLabel(i.checked, i.text),
+                  value: String(i.itemIndex),
+                }),
+              (i) => i.description,
             ),
           });
           try {
@@ -1096,7 +1128,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       if (content.type === 'checklist' && content.checklistId && Array.isArray(content.items)) {
         const checklistId = content.checklistId as string;
         const title = content.title as string;
-        const items = content.items as Array<{ index: number; text: string }>;
+        const items = content.items as Array<{ index: number; text: string; description?: string | null }>;
         if (!title) {
           log.error('checklist missing required title — skipping delivery', { checklistId });
           return;
@@ -1106,12 +1138,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           // `chk:<checklistId>:<index>` mirrors `ncq:`'s short-id scheme so
           // the whole action id stays inside Telegram's 64-byte callback_data
           // cap.
-          children: checklistActionRows(items, (item) =>
-            Button({
-              id: `chk:${checklistId}:${item.index}`,
-              label: checklistLabel(false, item.text),
-              value: String(item.index),
-            }),
+          children: checklistCardChildren(
+            items,
+            (item) =>
+              Button({
+                id: `chk:${checklistId}:${item.index}`,
+                label: checklistLabel(false, item.text),
+                value: String(item.index),
+              }),
+            (item) => item.description,
           ),
         });
         const result = await adapter.postMessage(tid, {
