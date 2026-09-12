@@ -52,6 +52,7 @@ function item(overrides: Partial<ChecklistItem> = {}): ChecklistItem {
     channelType: 'telegram',
     threadId: null,
     sourceFile: null,
+    sectionHeading: null,
     createdAt: now(),
     ...overrides,
   };

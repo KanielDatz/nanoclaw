@@ -1229,7 +1229,9 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     // failure.
     const alwaysTrustedTransitiveNativeDeps = ['sharp', 'better-sqlite3'];
     const allowlistPackages = [...new Set([...npmPackages, ...alwaysTrustedTransitiveNativeDeps])];
-    const allowlist = allowlistPackages.map((p) => `echo 'only-built-dependencies[]=${p}' >> /root/.npmrc`).join(' && ');
+    const allowlist = allowlistPackages
+      .map((p) => `echo 'only-built-dependencies[]=${p}' >> /root/.npmrc`)
+      .join(' && ');
     dockerfile += `RUN ${allowlist} && pnpm install -g ${npmPackages.join(' ')}\n`;
   }
   dockerfile += 'USER node\n';

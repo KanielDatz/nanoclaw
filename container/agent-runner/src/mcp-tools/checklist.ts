@@ -90,6 +90,11 @@ export const sendChecklist: McpToolDefinition = {
           description:
             'Optional. Path relative to this group\'s memory/ directory (e.g. "tracking/shopping-list.md"). When set, each item\'s exact text must match a line in that file (after stripping a leading "- ") so toggling can add/remove it there.',
         },
+        section: {
+          type: 'string',
+          description:
+            'Optional, only meaningful with sourceFile. The markdown heading (without "##", e.g. "Open / this week") that bounds where items live in that file — toggling only searches/inserts inside this section, never the file\'s other sections (e.g. a chores file\'s "Standing responsibilities"). Defaults to "Items" if omitted, matching shopping-list.md\'s convention.',
+        },
       },
       required: ['to', 'title', 'items'],
     },
@@ -99,6 +104,7 @@ export const sendChecklist: McpToolDefinition = {
     const title = args.title as string;
     const items = args.items as string[];
     const sourceFile = (args.sourceFile as string) || null;
+    const section = (args.section as string) || null;
     if (!to) return err(`to is required. Options: ${destinationList()}`);
     if (!title) return err('title is required');
     if (!Array.isArray(items) || items.length === 0) return err('items must be a non-empty array');
@@ -121,6 +127,7 @@ export const sendChecklist: McpToolDefinition = {
         title,
         items: items.map((text, index) => ({ index, text })),
         sourceFile,
+        section,
       }),
     });
 

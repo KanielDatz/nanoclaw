@@ -812,7 +812,7 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
   let bridge: ReturnType<typeof createChatSdkBridge>;
   let boundAdapter: Adapter;
 
-  async function seedChecklist(sourceFile: string | null): Promise<void> {
+  async function seedChecklist(sourceFile: string | null, sectionHeading: string | null = null): Promise<void> {
     const { createAgentGroup } = await import('../db/agent-groups.js');
     const { createSession } = await import('../db/sessions.js');
     const { createChecklistItems } = await import('../db/checklists.js');
@@ -851,6 +851,7 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
         channelType: 'telegram',
         threadId: null,
         sourceFile,
+        sectionHeading,
         createdAt: ts,
       })),
     );
@@ -993,6 +994,7 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
         channelType: 'telegram',
         threadId: null,
         sourceFile: null,
+        sectionHeading: null,
         createdAt: ts,
       })),
     );
@@ -1046,6 +1048,42 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
     expect(onAction).not.toHaveBeenCalled();
     expect(requestWake).not.toHaveBeenCalled();
     expect(writeSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it('bounds sync to a custom section heading, leaving an unrelated section with the same item text alone', async () => {
+    await seedChecklist('tracking/chores.md', 'Open / this week');
+    const filePath = `${CHK_TEST_DIR}/groups/household/memory/tracking/chores.md`;
+    const original = [
+      '# Chores',
+      '',
+      '## Standing responsibilities',
+      '',
+      '- milk', // deliberately duplicated item text in a DIFFERENT section
+      '',
+      '## Open / this week',
+      '',
+      '- milk',
+      '- eggs',
+      '',
+      '## How this file works',
+      '',
+      'prose…',
+      '',
+    ].join('\n');
+    fsSync.writeFileSync(filePath, original, 'utf-8');
+
+    await fireTap(0); // check "milk" in "Open / this week" only
+    let lines = fsSync.readFileSync(filePath, 'utf-8').split('\n');
+    // The "Standing responsibilities" copy survives untouched.
+    expect(lines.filter((l) => l.trim() === '- milk')).toEqual(['- milk']);
+    expect(lines.indexOf('- milk')).toBeLessThan(lines.indexOf('## Open / this week'));
+
+    await fireTap(0); // uncheck → restored inside "Open / this week", not the standing section
+    lines = fsSync.readFileSync(filePath, 'utf-8').split('\n');
+    const milkIndexes = lines.reduce<number[]>((acc, l, i) => (l.trim() === '- milk' ? [...acc, i] : acc), []);
+    expect(milkIndexes).toHaveLength(2);
+    expect(milkIndexes[1]).toBeGreaterThan(lines.indexOf('## Open / this week'));
+    expect(milkIndexes[1]).toBeLessThan(lines.indexOf('## How this file works'));
   });
 
   it('still updates the DB and the card when the source file is missing', async () => {

@@ -460,10 +460,13 @@ function checklistActionRows<T>(items: T[], toButton: (item: T) => ButtonElement
   return rows;
 }
 
+/** Default section heading for a checklist's `sourceFile` sync when none is given. */
+const DEFAULT_SECTION_HEADING = 'items';
+
 /**
- * The half-open `[start, end)` line range holding the body of the `## Items`
- * section — start is the line after the heading, end is the next heading (or
- * end of file). `null` when the file has no `## Items` heading.
+ * The half-open `[start, end)` line range holding the body of the given
+ * section heading — start is the line after the heading, end is the next
+ * heading (or end of file). `null` when the file has no matching heading.
  *
  * The real deployed `shopping-list.md` is shaped:
  *
@@ -476,15 +479,25 @@ function checklistActionRows<T>(items: T[], toButton: (item: T) => ButtonElement
  *
  *     prose…
  *
- * Both directions of the toggle are bounded by this range, so they stay
- * symmetric: a `- milk` line appearing as an example under "How this file
- * works" is neither removed by a check nor treated as the list's tail by an
- * uncheck.
+ * `chores.md` uses a different heading for its completable items
+ * ("Open / this week", not "Items") alongside a non-completable
+ * "Standing responsibilities" section — `sectionHeading` (from
+ * `send_checklist`'s optional `section` arg, denormalized onto
+ * `checklist_items.section_heading`) is what tells this function which one
+ * bounds a given checklist's file sync. Both directions of the toggle are
+ * bounded by this range, so they stay symmetric: a line appearing as an
+ * example under an unrelated section (prose, or another list) is neither
+ * removed by a check nor treated as the list's tail by an uncheck.
  *
  * Exported for unit testing against a fixture of that exact structure.
  */
-export function itemsSectionRange(lines: string[]): { headingIdx: number; start: number; end: number } | null {
-  const headingIdx = lines.findIndex((l) => /^##+\s+items\s*$/i.test(l.trim()));
+export function itemsSectionRange(
+  lines: string[],
+  sectionHeading: string = DEFAULT_SECTION_HEADING,
+): { headingIdx: number; start: number; end: number } | null {
+  const escaped = sectionHeading.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^##+\\s+${escaped}\\s*$`, 'i');
+  const headingIdx = lines.findIndex((l) => pattern.test(l.trim()));
   if (headingIdx === -1) return null;
   let end = lines.length;
   for (let i = headingIdx + 1; i < lines.length; i++) {
@@ -497,12 +510,12 @@ export function itemsSectionRange(lines: string[]): { headingIdx: number; start:
 }
 
 /**
- * Remove the first `itemLine` found **inside the `## Items` section**. With no
- * `## Items` heading the whole file is the search space (a flat list file).
+ * Remove the first `itemLine` found **inside the named section**. With no
+ * matching heading the whole file is the search space (a flat list file).
  * Returns the lines unchanged when the item is not present.
  */
-export function removeItemLine(lines: string[], itemLine: string): string[] {
-  const range = itemsSectionRange(lines);
+export function removeItemLine(lines: string[], itemLine: string, sectionHeading?: string): string[] {
+  const range = itemsSectionRange(lines, sectionHeading);
   const start = range ? range.start : 0;
   const end = range ? range.end : lines.length;
   for (let i = start; i < end; i++) {
@@ -517,13 +530,13 @@ export function removeItemLine(lines: string[], itemLine: string): string[] {
 
 /**
  * Where a restored (unchecked) item's line goes back in: after the LAST item
- * under `## Items` — i.e. immediately before the trailing blank line(s) that
- * precede the next heading — so it never lands inside the prose section. When
- * there is no `## Items` heading at all, fall back to end-of-file.
+ * in the named section — i.e. immediately before the trailing blank line(s)
+ * that precede the next heading — so it never lands inside another section.
+ * When there is no matching heading at all, fall back to end-of-file.
  */
-export function insertItemLine(lines: string[], itemLine: string): string[] {
+export function insertItemLine(lines: string[], itemLine: string, sectionHeading?: string): string[] {
   const out = [...lines];
-  const range = itemsSectionRange(out);
+  const range = itemsSectionRange(out, sectionHeading);
   if (!range) {
     out.push(itemLine);
     return out;
@@ -535,9 +548,9 @@ export function insertItemLine(lines: string[], itemLine: string): string[] {
   return out;
 }
 
-/** True when `itemLine` already appears inside the `## Items` section. */
-export function hasItemLine(lines: string[], itemLine: string): boolean {
-  return removeItemLine(lines, itemLine) !== lines;
+/** True when `itemLine` already appears inside the named section. */
+export function hasItemLine(lines: string[], itemLine: string, sectionHeading?: string): boolean {
+  return removeItemLine(lines, itemLine, sectionHeading) !== lines;
 }
 
 export function splitForLimit(text: string, limit: number): string[] {
@@ -854,11 +867,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
                   const raw = await fs.readFile(filePath, 'utf-8');
                   let lines = raw.split('\n');
                   const itemLine = `- ${item.text}`;
+                  const section = item.sectionHeading ?? undefined;
                   if (newChecked) {
-                    // "Bought" means "no longer needed" — drop the line.
-                    lines = removeItemLine(lines, itemLine);
-                  } else if (!hasItemLine(lines, itemLine)) {
-                    lines = insertItemLine(lines, itemLine);
+                    // "Bought"/"done" means "no longer needed" — drop the line.
+                    lines = removeItemLine(lines, itemLine, section);
+                  } else if (!hasItemLine(lines, itemLine, section)) {
+                    lines = insertItemLine(lines, itemLine, section);
                   }
                   await fs.writeFile(filePath, lines.join('\n'), 'utf-8');
                 }

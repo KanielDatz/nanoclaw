@@ -494,6 +494,7 @@ async function deliverMessage(
   ) {
     const checklistId = content.checklistId as string;
     const sourceFile = (content.sourceFile as string) || null;
+    const sectionHeading = (content.section as string) || null;
     // The title lives on the outbound content, not on any per-item field. It is
     // denormalized onto every row so the host-side toggle handler can re-render
     // the card without reaching back into the session's outbound.db.
@@ -511,6 +512,7 @@ async function deliverMessage(
       channelType: msg.channelType,
       threadId: msg.threadId,
       sourceFile,
+      sectionHeading,
       createdAt: new Date().toISOString(),
     }));
     await createChecklistItems(rows);

@@ -15,6 +15,8 @@ export interface ChecklistItem {
   channelType: string | null;
   threadId: string | null;
   sourceFile: string | null;
+  /** Markdown heading `sourceFile`'s items live under. `null` means "Items". */
+  sectionHeading: string | null;
   createdAt: string;
 }
 
@@ -30,6 +32,7 @@ interface ChecklistItemRow {
   channel_type: string | null;
   thread_id: string | null;
   source_file: string | null;
+  section_heading: string | null;
   created_at: string;
 }
 
@@ -46,6 +49,7 @@ function fromRow(row: ChecklistItemRow): ChecklistItem {
     channelType: row.channel_type,
     threadId: row.thread_id,
     sourceFile: row.source_file,
+    sectionHeading: row.section_heading,
     createdAt: row.created_at,
   };
 }
@@ -64,9 +68,9 @@ export async function createChecklistItems(items: ChecklistItem[]): Promise<void
     for (const item of items) {
       await db.run(
         `INSERT INTO checklist_items
-             (checklist_id, item_index, text, title, checked, session_id, message_out_id, platform_id, channel_type, thread_id, source_file, created_at)
+             (checklist_id, item_index, text, title, checked, session_id, message_out_id, platform_id, channel_type, thread_id, source_file, section_heading, created_at)
            VALUES
-             (@checklist_id, @item_index, @text, @title, @checked, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @source_file, @created_at)
+             (@checklist_id, @item_index, @text, @title, @checked, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @source_file, @section_heading, @created_at)
            ON CONFLICT (checklist_id, item_index) DO NOTHING`,
         {
           checklist_id: item.checklistId,
@@ -80,6 +84,7 @@ export async function createChecklistItems(items: ChecklistItem[]): Promise<void
           channel_type: item.channelType,
           thread_id: item.threadId,
           source_file: item.sourceFile,
+          section_heading: item.sectionHeading,
           created_at: item.createdAt,
         },
       );
