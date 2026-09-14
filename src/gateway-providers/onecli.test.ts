@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
-vi.mock('../config.js', () => ({ ONECLI_URL: 'http://localhost:1', ONECLI_API_KEY: 'unused' }));
+vi.mock('../config.js', () => ({
+  ONECLI_URL: 'http://localhost:1',
+  ONECLI_API_KEY: 'unused',
+  DATA_DIR: '/install/data',
+}));
 
 import { contributionFromArgs } from './onecli.js';
 

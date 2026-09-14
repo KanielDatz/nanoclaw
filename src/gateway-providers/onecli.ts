@@ -21,6 +21,7 @@ import { ONECLI_API_KEY, ONECLI_URL } from '../config.js';
 import type { MountSpec } from '../drivers/types.js';
 import { log } from '../log.js';
 
+import { withChromiumGatewayTrust } from './chromium-ca-policy.js';
 import {
   registerGatewayProvider,
   type GatewayApprovalRequest,
@@ -95,6 +96,8 @@ registerGatewayProvider('onecli', () => ({
       throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
     }
     log.info('OneCLI gateway applied', { agentGroupId: key.agentGroupId, sessionId: key.sessionId });
-    return contributionFromArgs(args, key.agentGroupId);
+    // Chromium ignores every CA env var the gateway sets, so its trust anchor
+    // rides as a managed-policy mount instead — see chromium-ca-policy.ts.
+    return withChromiumGatewayTrust(contributionFromArgs(args, key.agentGroupId), key.agentGroupId);
   },
 }));

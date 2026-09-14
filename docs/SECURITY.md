@@ -175,6 +175,30 @@ pip, curl, node/bun with the proxy env) are unaffected. Any workflow that relies
 on a **non-proxy-aware** tool reaching the internet directly will fail by design.
 Lockdown is **off by default**; opt in with `NANOCLAW_EGRESS_LOCKDOWN=true`.
 
+### 6. Browser Trust for the Gateway CA
+
+The gateway terminates TLS to inject credentials, so every certificate an agent
+sees is signed by the gateway's own CA. The gateway's container config points
+the usual clients at that CA (`NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`,
+`REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO`), but **Chromium honors none of them** —
+it keeps its own trust store, so `agent-browser` failed every navigation with
+`net::ERR_CERT_AUTHORITY_INVALID`.
+
+The host therefore derives a Chromium managed-policy document
+(`CACertificates`, Chrome 131+) from that same CA and mounts it read-only at
+`/etc/chromium/policies/managed/nanoclaw-gateway-ca.json`
+(`src/gateway-providers/chromium-ca-policy.ts`). Browser traffic keeps going
+through the gateway — credential injection, rules and audit unchanged — and
+Chromium trusts exactly the one CA curl and Node already trust. Exempting the
+browser from the proxy instead is *not* an option under lockdown: the internal
+network has no route off-box, and Docker networking is per-container, so
+"direct egress for one process" would mean direct egress for the whole agent.
+
+The generated policy files live in `data/gateway-trust/` — deliberately not the
+OS temp dir, because on a VM-backed Docker (Colima) the host's `$TMPDIR` is not
+shared into the VM and such a bind mount silently materializes as an empty
+directory inside the container.
+
 ## Resource Limits
 
 Per-container CPU and memory caps are **opt-in and unset by default** — a runaway
