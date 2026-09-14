@@ -661,9 +661,11 @@ describe('createChatSdkBridge.deliver — checklist cards', () => {
     const msg = calls[0].message as {
       card?: { title?: string; children?: Array<{ type?: string; children?: CapturedButton[] }> };
     };
-    const actionsRow = msg.card?.children?.find((c) => c.type === 'actions');
-    expect(actionsRow).toBeDefined();
-    return actionsRow?.children ?? [];
+    // CHECKLIST_BUTTONS_PER_ROW is 1 — flatten across all Actions rows,
+    // there is no single "the" row anymore.
+    const actionRows = (msg.card?.children ?? []).filter((c) => c.type === 'actions');
+    expect(actionRows.length).toBeGreaterThan(0);
+    return actionRows.flatMap((c) => c.children ?? []);
   }
 
   it('renders one button per item, ids chk:<checklistId>:<index>, all unchecked', async () => {
@@ -695,7 +697,7 @@ describe('createChatSdkBridge.deliver — checklist cards', () => {
     expect(msg.fallbackText).toBe('Shopping\n⬜ milk\n⬜ eggs');
   });
 
-  it('splits items into multiple rows instead of one long row', async () => {
+  it('puts every item on its own row, not batched onto shared rows', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
       adapter: stubAdapter({ postMessage }),
@@ -718,10 +720,13 @@ describe('createChatSdkBridge.deliver — checklist cards', () => {
       card?: { children?: Array<{ type?: string; children?: CapturedButton[] }> };
     };
     const actionRows = msg.card?.children?.filter((c) => c.type === 'actions') ?? [];
-    // CHECKLIST_BUTTONS_PER_ROW is 2 — 3 items must split 2 + 1, not one row of 3.
-    expect(actionRows).toHaveLength(2);
-    expect(actionRows[0].children?.map((b) => b.id)).toEqual(['chk:cl1:0', 'chk:cl1:1']);
-    expect(actionRows[1].children?.map((b) => b.id)).toEqual(['chk:cl1:2']);
+    // CHECKLIST_BUTTONS_PER_ROW is 1 — 3 items must be 3 separate rows, never
+    // batched together (real-world item text, especially Hebrew, still read
+    // poorly crowded two-per-row — this is the live-feedback fix for that).
+    expect(actionRows).toHaveLength(3);
+    expect(actionRows[0].children?.map((b) => b.id)).toEqual(['chk:cl1:0']);
+    expect(actionRows[1].children?.map((b) => b.id)).toEqual(['chk:cl1:1']);
+    expect(actionRows[2].children?.map((b) => b.id)).toEqual(['chk:cl1:2']);
   });
 
   it('switches to one-per-row with description text under the described items only', async () => {
@@ -760,7 +765,7 @@ describe('createChatSdkBridge.deliver — checklist cards', () => {
     expect(children[secondRowIdx + 1]).toBeUndefined();
   });
 
-  it('keeps the compact multi-per-row layout when no item has a description', async () => {
+  it('adds no stray description text when description is null/undefined, not just falsy-but-present', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
       adapter: stubAdapter({ postMessage }),
@@ -779,10 +784,14 @@ describe('createChatSdkBridge.deliver — checklist cards', () => {
       },
     });
     const msg = calls[0].message as { card?: { children?: Array<{ type?: string }> } };
+    const children = msg.card?.children ?? [];
     // A `description` key present but empty/undefined must not trip the
-    // "any item described" switch — this is the real request shape
-    // send_checklist produces for a plain string item.
-    expect(msg.card?.children?.filter((c) => c.type === 'actions')).toHaveLength(1);
+    // "any item described" switch into inserting text children — this is
+    // the real request shape send_checklist produces for a plain string
+    // item. One row per item either way (CHECKLIST_BUTTONS_PER_ROW is 1),
+    // but no stray CardText should appear for either.
+    expect(children.filter((c) => c.type === 'actions')).toHaveLength(2);
+    expect(children.filter((c) => c.type === 'text')).toHaveLength(0);
   });
 
   it('skips delivery when the checklist has no title', async () => {
@@ -863,7 +872,10 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
     const msg = list[0].message as {
       card?: { title?: string; children?: Array<{ type?: string; children?: CapturedButton[] }> };
     };
-    return msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
+    // CHECKLIST_BUTTONS_PER_ROW is 1 — every item is its own Actions row, so
+    // flatten across ALL of them, not just the first (there is no single
+    // "the" actions row to grab anymore).
+    return (msg.card?.children ?? []).filter((c) => c.type === 'actions').flatMap((c) => c.children ?? []);
   }
 
   // Typed to ChannelSetup['onAction'] so the spy is assignable to bridge.setup
@@ -1068,12 +1080,14 @@ describe('chat.onAction — chk: checklist toggles (host-side only, never wakes 
       card?: { children?: Array<{ type?: string; children?: CapturedButton[] }> };
     };
     const actionRows = msg.card?.children?.filter((c) => c.type === 'actions') ?? [];
-    // CHECKLIST_BUTTONS_PER_ROW is 2 — 3 items must split 2 + 1 on re-render too,
-    // same as on initial delivery. This is the toggle-handler's own render path,
-    // a separate call site from the initial `content.type === 'checklist'` branch.
-    expect(actionRows).toHaveLength(2);
-    expect(actionRows[0].children?.map((b) => b.id)).toEqual(['chk:cl1:0', 'chk:cl1:1']);
-    expect(actionRows[1].children?.map((b) => b.id)).toEqual(['chk:cl1:2']);
+    // CHECKLIST_BUTTONS_PER_ROW is 1 — 3 items must be 3 separate rows on
+    // re-render too, same as on initial delivery. This is the toggle-handler's
+    // own render path, a separate call site from the initial
+    // `content.type === 'checklist'` branch.
+    expect(actionRows).toHaveLength(3);
+    expect(actionRows[0].children?.map((b) => b.id)).toEqual(['chk:cl1:0']);
+    expect(actionRows[1].children?.map((b) => b.id)).toEqual(['chk:cl1:1']);
+    expect(actionRows[2].children?.map((b) => b.id)).toEqual(['chk:cl1:2']);
   });
 
   it('mirrors the toggle into the tracked source file: check removes the line, a second tap restores it', async () => {

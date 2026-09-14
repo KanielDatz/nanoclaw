@@ -448,8 +448,13 @@ function checklistLabel(checked: boolean, text: string): string {
  * in @chat-adapter/telegram) — a single `Actions` holding every item renders
  * as one long horizontally-scrolling row, unreadable past a handful of items.
  * Chunking into multiple `Actions` blocks gives real multi-row layout.
+ *
+ * 1, not 2: real-world item/task text (especially Hebrew, which the family
+ * uses daily) still wrapped and crowded at 2-per-row — live feedback after
+ * shipping 2-per-row was that it was still hard to read. One button per row
+ * costs vertical space but reads cleanly regardless of text length or RTL.
  */
-const CHECKLIST_BUTTONS_PER_ROW = 2;
+const CHECKLIST_BUTTONS_PER_ROW = 1;
 
 /** Split checklist items into `Actions([...])` rows of `CHECKLIST_BUTTONS_PER_ROW`. */
 function checklistActionRows<T>(items: T[], toButton: (item: T) => ButtonElement): ActionsElement[] {
